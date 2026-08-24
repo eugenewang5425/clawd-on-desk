@@ -666,51 +666,62 @@
 
     const body = document.createElement("div");
     body.className = "collapsible-group-body";
-    for (const child of children) body.appendChild(child);
+    const bodyInner = document.createElement("div");
+    bodyInner.className = "collapsible-group-body-inner";
+    for (const child of children) bodyInner.appendChild(child);
+    body.appendChild(bodyInner);
 
-    function measureCollapsibleBodyHeight() {
-      return `${body.scrollHeight}px`;
+    let transitionTimer = null;
+    let contentAnimationTimer = null;
+
+    function scheduleTimeout(callback, delay) {
+      if (typeof setTimeout === "function") return setTimeout(callback, delay);
+      requestAnimationFrame(callback);
+      return null;
     }
 
-    function setExpandedBodyHeight() {
-      body.style.setProperty("--collapsible-body-height", measureCollapsibleBodyHeight());
+    function cancelTimeout(timer) {
+      if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
+    }
+
+    function prefersReducedMotion() {
+      return typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+
+    function clearTransitionTimer() {
+      if (transitionTimer === null) return;
+      cancelTimeout(transitionTimer);
+      transitionTimer = null;
+    }
+
+    function finishTransition() {
+      clearTransitionTimer();
+      group.classList.remove("expanding", "collapsing");
     }
 
     function refreshCollapsibleHeight() {
-      if (collapsed || !group.classList.contains("expanding")) return;
-      requestAnimationFrame(() => {
-        if (!collapsed && group.classList.contains("expanding")) setExpandedBodyHeight();
-      });
+      // Compatibility shim: the grid-based body follows its natural height.
     }
 
     function mutateCollapsibleBody(mutate) {
       if (typeof mutate !== "function") return;
-      if (collapsed || group.classList.contains("collapsing")) {
-        mutate();
-        return;
-      }
-      if (group.classList.contains("expanding")) {
-        mutate();
-        refreshCollapsibleHeight();
-        return;
-      }
-
-      const beforeHeight = body.scrollHeight;
       mutate();
-      const afterHeight = body.scrollHeight;
-      const prefersReducedMotion = typeof window.matchMedia === "function"
-        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (beforeHeight === afterHeight || prefersReducedMotion) return;
+      if (collapsed || group.classList.contains("collapsing") || prefersReducedMotion()) return;
+      cancelTimeout(contentAnimationTimer);
+      group.classList.remove("collapsible-content-entering");
+      void bodyInner.offsetWidth;
+      group.classList.add("collapsible-content-entering");
+      contentAnimationTimer = scheduleTimeout(() => {
+        contentAnimationTimer = null;
+        group.classList.remove("collapsible-content-entering");
+      }, 240);
+    }
 
-      // The settled-open body normally uses max-height:none so reflow can grow
-      // freely. Pin its pre-mutation height for one frame, then animate to the
-      // new measured height instead of letting async rows cause a layout jump.
-      body.style.setProperty("--collapsible-body-height", `${beforeHeight}px`);
-      group.classList.add("resizing");
-      void body.offsetHeight;
+    function suppressTransitionOnce() {
+      group.classList.add("collapsible-no-motion");
       requestAnimationFrame(() => {
-        if (collapsed || !group.classList.contains("resizing")) return;
-        body.style.setProperty("--collapsible-body-height", `${afterHeight}px`);
+        group.classList.remove("collapsible-no-motion");
       });
     }
 
@@ -742,44 +753,22 @@
       });
     }
 
-    function applyCollapsedState({ animate = false } = {}) {
+    function applyCollapsedState({ animate = false, suppressTransition = false } = {}) {
       disclosure.setAttribute("aria-expanded", collapsed ? "false" : "true");
       const actionLabel = collapsed ? t("collapsibleExpand") : t("collapsibleCollapse");
       disclosure.setAttribute("aria-label", disclosureLabel ? `${actionLabel}: ${disclosureLabel}` : actionLabel);
-      group.classList.remove("expanding", "collapsing", "resizing");
-      if (!animate) {
+      clearTransitionTimer();
+      group.classList.remove("expanding", "collapsing");
+      setBodyInteractivity(collapsed);
+      if (!animate || prefersReducedMotion()) {
+        if (suppressTransition && !prefersReducedMotion()) suppressTransitionOnce();
         group.classList.toggle("collapsed", collapsed);
-        setBodyInteractivity(collapsed);
-        if (collapsed) {
-          body.style.setProperty("--collapsible-body-height", "0px");
-        } else {
-          // Settled-open groups must NOT keep a pinned max-height: text zoom
-          // or window-width changes rewrap descriptions and grow the content,
-          // and a stale pinned height clips the bottom rows (overflow:
-          // hidden). A measured height is only needed while animating.
-          body.style.setProperty("--collapsible-body-height", "none");
-        }
         return;
       }
 
-      if (collapsed) {
-        group.classList.add("collapsing");
-        setBodyInteractivity(true);
-        setExpandedBodyHeight();
-        requestAnimationFrame(() => {
-          group.classList.add("collapsed");
-          body.style.setProperty("--collapsible-body-height", "0px");
-        });
-        return;
-      }
-
-      group.classList.add("expanding", "collapsed");
-      setBodyInteractivity(false);
-      body.style.setProperty("--collapsible-body-height", "0px");
-      requestAnimationFrame(() => {
-        group.classList.remove("collapsed");
-        setExpandedBodyHeight();
-      });
+      group.classList.add(collapsed ? "collapsing" : "expanding");
+      group.classList.toggle("collapsed", collapsed);
+      transitionTimer = scheduleTimeout(finishTransition, 300);
     }
 
     function setCollapsed(
@@ -793,7 +782,7 @@
         nextState[id] = collapsed;
         writeCollapsedGroupState(nextState);
       }
-      preserveScrollAnchor(() => applyCollapsedState({ animate }));
+      preserveScrollAnchor(() => applyCollapsedState({ animate, suppressTransition: !animate }));
     }
 
     function toggleCollapsed() {
@@ -810,17 +799,13 @@
 
     group.appendChild(header);
     group.appendChild(body);
-    body.addEventListener("transitionend", (ev) => {
-      if (ev.target !== body || ev.propertyName !== "max-height") return;
-      group.classList.remove("expanding", "collapsing", "resizing");
-      // Release the pinned height once settled so later reflows (text zoom,
-      // window resize) can grow the body instead of clipping at the bottom.
-      if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
-    });
+    const finishBodyTransition = (ev) => {
+      if (ev.target !== body || ev.propertyName !== "grid-template-rows") return;
+      finishTransition();
+    };
+    body.addEventListener("transitionend", finishBodyTransition);
+    body.addEventListener("transitioncancel", finishBodyTransition);
     applyCollapsedState();
-    requestAnimationFrame(() => {
-      if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
-    });
     group.expand = ({
       persist = true,
       animate = animateExpansion,

@@ -553,17 +553,26 @@ html, body {
   }
 }
 .collapsible-group-body {
-  max-height: var(--collapsible-body-height, 0px);
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+  transition: grid-template-rows 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: grid-template-rows;
+}
+.collapsible-group-body-inner {
+  min-height: 0;
   overflow: hidden;
   border-top: 1px solid var(--row-border);
   padding: 10px 16px 12px 40px;
   opacity: 1;
   transform: translateY(0);
-  transition: max-height 0.22s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.16s ease, transform 0.18s ease, padding 0.18s ease, border-color 0.18s ease;
-  will-change: max-height, opacity, transform;
+  transition: opacity 0.16s ease, transform 0.18s ease, padding 0.18s ease, border-color 0.18s ease;
+  will-change: opacity, transform;
 }
 .collapsible-group.collapsed > .collapsible-group-body {
-  max-height: 0;
+  grid-template-rows: 0fr;
+}
+.collapsible-group.collapsed > .collapsible-group-body > .collapsible-group-body-inner {
   border-top-color: transparent;
   padding-top: 0;
   padding-bottom: 0;
@@ -571,14 +580,26 @@ html, body {
   transform: translateY(-4px);
 }
 .collapsible-group.expanding .collapsible-group-body,
-.collapsible-group.collapsing .collapsible-group-body,
-.collapsible-group.resizing .collapsible-group-body {
+.collapsible-group.collapsing .collapsible-group-body {
   pointer-events: none;
 }
-.collapsible-group:not(.collapsed):has(.language-picker.menu-mounted) > .collapsible-group-body {
+.collapsible-group:not(.collapsed):not(.expanding):not(.collapsing) > .collapsible-group-body,
+.collapsible-group:not(.collapsed):has(.language-picker.menu-mounted) > .collapsible-group-body,
+.collapsible-group:not(.collapsed):has(.language-picker.menu-mounted) > .collapsible-group-body > .collapsible-group-body-inner {
   overflow: visible;
 }
-.agent-subgroup .collapsible-group-body {
+.collapsible-group.collapsible-no-motion > .collapsible-group-body,
+.collapsible-group.collapsible-no-motion > .collapsible-group-body > .collapsible-group-body-inner {
+  transition: none;
+}
+.collapsible-group.collapsible-content-entering > .collapsible-group-body > .collapsible-group-body-inner {
+  animation: collapsibleContentEnter 0.18s ease;
+}
+@keyframes collapsibleContentEnter {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
+}
+.agent-subgroup .collapsible-group-body-inner {
   padding: 0;
 }
 .agent-subgroup .collapsible-group-body .row:last-child {
@@ -677,8 +698,12 @@ html, body {
   .collapsible-group-chevron,
   .anim-override-chevron,
   .collapsible-group-summary,
-  .collapsible-group-body {
+  .collapsible-group-body,
+  .collapsible-group-body-inner {
     transition: none;
+  }
+  .collapsible-group.collapsible-content-entering > .collapsible-group-body > .collapsible-group-body-inner {
+    animation: none;
   }
 }
 
