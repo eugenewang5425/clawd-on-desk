@@ -592,6 +592,161 @@
     return chevron;
   }
 
+  let settingsDisclosureId = 0;
+
+  function attachSettingsDisclosure({
+    root: disclosureRoot,
+    trigger,
+    body,
+    expanded = false,
+    animate = true,
+    onExpandedChange = null,
+    preserveStateChange = null,
+    syncTrigger = null,
+  } = {}) {
+    if (!disclosureRoot || !trigger || !body) {
+      throw new TypeError("attachSettingsDisclosure requires root, trigger, and body");
+    }
+    const bodyInner = body.querySelector(".settings-disclosure-body-inner");
+    if (!bodyInner) throw new TypeError("Settings disclosure body requires an inner wrapper");
+
+    let isExpanded = !!expanded;
+    let transitionTimer = null;
+    let transitionState = null;
+    let disposed = false;
+    disclosureRoot.classList.add("settings-disclosure");
+    trigger.classList.add("settings-disclosure-trigger");
+    body.classList.add("settings-disclosure-body");
+
+    const triggerTag = String(trigger.tagName || "").toUpperCase();
+    if (triggerTag !== "BUTTON") {
+      if (!trigger.getAttribute("role")) trigger.setAttribute("role", "button");
+      if (!trigger.getAttribute("tabindex")) trigger.setAttribute("tabindex", "0");
+    }
+    if (!body.getAttribute("id")) {
+      settingsDisclosureId += 1;
+      body.setAttribute("id", `settings-disclosure-body-${settingsDisclosureId}`);
+    }
+    trigger.setAttribute("aria-controls", body.getAttribute("id"));
+
+    function prefersReducedMotion() {
+      return typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+
+    function scheduleTimeout(callback, delay) {
+      if (typeof setTimeout === "function") return setTimeout(callback, delay);
+      requestAnimationFrame(callback);
+      return null;
+    }
+
+    function cancelTimeout(timer) {
+      if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
+    }
+
+    function finishTransition() {
+      cancelTimeout(transitionTimer);
+      transitionTimer = null;
+      transitionState = null;
+      disclosureRoot.classList.remove("expanding", "collapsing");
+    }
+
+    function setBodyInteractivity(nextExpanded) {
+      body.setAttribute("aria-hidden", nextExpanded ? "false" : "true");
+      if ("inert" in body) {
+        body.inert = !nextExpanded;
+      } else if (nextExpanded) {
+        body.removeAttribute("inert");
+      } else {
+        body.setAttribute("inert", "");
+      }
+    }
+
+    function syncState() {
+      trigger.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+      disclosureRoot.classList.toggle("expanded", isExpanded);
+      disclosureRoot.classList.toggle("collapsed", !isExpanded);
+      setBodyInteractivity(isExpanded);
+      if (typeof syncTrigger === "function") syncTrigger(isExpanded);
+    }
+
+    function suppressTransitionOnce() {
+      disclosureRoot.classList.add("settings-disclosure-no-motion");
+      requestAnimationFrame(() => {
+        if (!disposed) disclosureRoot.classList.remove("settings-disclosure-no-motion");
+      });
+    }
+
+    function setExpanded(nextExpanded, options = {}) {
+      if (disposed) return false;
+      const normalized = !!nextExpanded;
+      if (normalized === isExpanded) return false;
+      const shouldAnimate = options.animate === undefined ? animate : options.animate !== false;
+      const apply = () => {
+        finishTransition();
+        isExpanded = normalized;
+        syncState();
+        if (!shouldAnimate || prefersReducedMotion()) {
+          if (!prefersReducedMotion()) suppressTransitionOnce();
+          return;
+        }
+        transitionState = isExpanded ? "expanding" : "collapsing";
+        disclosureRoot.classList.add(transitionState);
+        transitionTimer = scheduleTimeout(finishTransition, 300);
+      };
+      if (typeof preserveStateChange === "function") preserveStateChange(apply);
+      else apply();
+      if (typeof onExpandedChange === "function") {
+        onExpandedChange(isExpanded, { persist: options.persist !== false });
+      }
+      return true;
+    }
+
+    function toggle(options = {}) {
+      return setExpanded(!isExpanded, options);
+    }
+
+    function onClick() {
+      toggle();
+    }
+
+    function onKeyDown(ev) {
+      if (ev.target !== trigger || (ev.key !== " " && ev.key !== "Enter")) return;
+      ev.preventDefault();
+      toggle();
+    }
+
+    function onBodyTransitionFinished(ev) {
+      if (ev.target !== body || ev.propertyName !== "grid-template-rows") return;
+      finishTransition();
+    }
+
+    trigger.addEventListener("click", onClick);
+    if (triggerTag !== "BUTTON") trigger.addEventListener("keydown", onKeyDown);
+    body.addEventListener("transitionend", onBodyTransitionFinished);
+    body.addEventListener("transitioncancel", onBodyTransitionFinished);
+    syncState();
+
+    return {
+      get expanded() { return isExpanded; },
+      get transitioning() { return transitionState; },
+      setExpanded,
+      expand: (options = {}) => setExpanded(true, options),
+      collapse: (options = {}) => setExpanded(false, options),
+      toggle,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        finishTransition();
+        disclosureRoot.classList.remove("settings-disclosure-no-motion");
+        trigger.removeEventListener("click", onClick);
+        if (triggerTag !== "BUTTON") trigger.removeEventListener("keydown", onKeyDown);
+        body.removeEventListener("transitionend", onBodyTransitionFinished);
+        body.removeEventListener("transitioncancel", onBodyTransitionFinished);
+      },
+    };
+  }
+
   function buildCollapsibleGroup({
     id,
     title = "",
@@ -671,7 +826,6 @@
     for (const child of children) bodyInner.appendChild(child);
     body.appendChild(bodyInner);
 
-    let transitionTimer = null;
     let contentAnimationTimer = null;
 
     function scheduleTimeout(callback, delay) {
@@ -689,17 +843,6 @@
         && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     }
 
-    function clearTransitionTimer() {
-      if (transitionTimer === null) return;
-      cancelTimeout(transitionTimer);
-      transitionTimer = null;
-    }
-
-    function finishTransition() {
-      clearTransitionTimer();
-      group.classList.remove("expanding", "collapsing");
-    }
-
     function refreshCollapsibleHeight() {
       // Compatibility shim: the grid-based body follows its natural height.
     }
@@ -707,7 +850,7 @@
     function mutateCollapsibleBody(mutate) {
       if (typeof mutate !== "function") return;
       mutate();
-      if (collapsed || group.classList.contains("collapsing") || prefersReducedMotion()) return;
+      if (!controller.expanded || controller.transitioning === "collapsing" || prefersReducedMotion()) return;
       cancelTimeout(contentAnimationTimer);
       group.classList.remove("collapsible-content-entering");
       void bodyInner.offsetWidth;
@@ -716,24 +859,6 @@
         contentAnimationTimer = null;
         group.classList.remove("collapsible-content-entering");
       }, 240);
-    }
-
-    function suppressTransitionOnce() {
-      group.classList.add("collapsible-no-motion");
-      requestAnimationFrame(() => {
-        group.classList.remove("collapsible-no-motion");
-      });
-    }
-
-    function setBodyInteractivity(isCollapsed) {
-      body.setAttribute("aria-hidden", isCollapsed ? "true" : "false");
-      if ("inert" in body) {
-        body.inert = isCollapsed;
-      } else if (isCollapsed) {
-        body.setAttribute("inert", "");
-      } else {
-        body.removeAttribute("inert");
-      }
     }
 
     function preserveScrollAnchor(invoke) {
@@ -753,67 +878,54 @@
       });
     }
 
-    function applyCollapsedState({ animate = false, suppressTransition = false } = {}) {
-      disclosure.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      const actionLabel = collapsed ? t("collapsibleExpand") : t("collapsibleCollapse");
-      disclosure.setAttribute("aria-label", disclosureLabel ? `${actionLabel}: ${disclosureLabel}` : actionLabel);
-      clearTransitionTimer();
-      group.classList.remove("expanding", "collapsing");
-      setBodyInteractivity(collapsed);
-      if (!animate || prefersReducedMotion()) {
-        if (suppressTransition && !prefersReducedMotion()) suppressTransitionOnce();
-        group.classList.toggle("collapsed", collapsed);
-        return;
-      }
-
-      group.classList.add(collapsed ? "collapsing" : "expanding");
-      group.classList.toggle("collapsed", collapsed);
-      transitionTimer = scheduleTimeout(finishTransition, 300);
-    }
-
-    function setCollapsed(
-      nextCollapsed,
-      { persist = true, animate = animateExpansion } = {},
-    ) {
-      if (collapsed === nextCollapsed) return;
-      collapsed = nextCollapsed;
-      if (persist) {
+    group.appendChild(header);
+    group.appendChild(body);
+    body.classList.add("settings-disclosure-body");
+    bodyInner.classList.add("settings-disclosure-body-inner");
+    const controller = attachSettingsDisclosure({
+      root: group,
+      trigger: disclosure,
+      body,
+      expanded: !collapsed,
+      animate: animateExpansion,
+      preserveStateChange: preserveScrollAnchor,
+      syncTrigger(isExpanded) {
+        const actionLabel = isExpanded ? t("collapsibleCollapse") : t("collapsibleExpand");
+        disclosure.setAttribute("aria-label", disclosureLabel ? `${actionLabel}: ${disclosureLabel}` : actionLabel);
+      },
+      onExpandedChange(isExpanded, { persist }) {
+        collapsed = !isExpanded;
+        if (!persist) return;
         const nextState = readCollapsedGroupState();
         nextState[id] = collapsed;
         writeCollapsedGroupState(nextState);
-      }
-      preserveScrollAnchor(() => applyCollapsedState({ animate, suppressTransition: !animate }));
-    }
-
-    function toggleCollapsed() {
-      setCollapsed(!collapsed);
-    }
-
-    disclosure.addEventListener("click", toggleCollapsed);
-    disclosure.addEventListener("keydown", (ev) => {
-      if (ev.key === " " || ev.key === "Enter") {
-        ev.preventDefault();
-        toggleCollapsed();
-      }
+      },
     });
-
-    group.appendChild(header);
-    group.appendChild(body);
-    const finishBodyTransition = (ev) => {
-      if (ev.target !== body || ev.propertyName !== "grid-template-rows") return;
-      finishTransition();
+    if (!state.mountedControls.settingsDisclosures
+      || typeof state.mountedControls.settingsDisclosures.add !== "function") {
+      state.mountedControls.settingsDisclosures = new Set();
+    }
+    const trackedDisclosure = {
+      dispose() {
+        controller.dispose();
+        cancelTimeout(contentAnimationTimer);
+        contentAnimationTimer = null;
+        group.classList.remove("collapsible-content-entering");
+      },
     };
-    body.addEventListener("transitionend", finishBodyTransition);
-    body.addEventListener("transitioncancel", finishBodyTransition);
-    applyCollapsedState();
+    state.mountedControls.settingsDisclosures.add(trackedDisclosure);
     group.expand = ({
       persist = true,
       animate = animateExpansion,
     } = {}) => {
-      setCollapsed(false, { persist, animate });
+      controller.expand({ persist, animate });
     };
     group.refreshCollapsibleHeight = refreshCollapsibleHeight;
     group.mutateCollapsibleBody = mutateCollapsibleBody;
+    group.disposeCollapsible = () => {
+      trackedDisclosure.dispose();
+      state.mountedControls.settingsDisclosures.delete(trackedDisclosure);
+    };
     return group;
   }
 
@@ -1117,6 +1229,10 @@
     if (state.mountedControls.textScale && typeof state.mountedControls.textScale.dispose === "function") {
       state.mountedControls.textScale.dispose();
     }
+    if (state.mountedControls.aboutUpdateErrorDisclosure
+      && typeof state.mountedControls.aboutUpdateErrorDisclosure.dispose === "function") {
+      state.mountedControls.aboutUpdateErrorDisclosure.dispose();
+    }
     for (const control of state.mountedControls.settingsSelects) {
       if (control && typeof control.dispose === "function") control.dispose();
     }
@@ -1125,6 +1241,14 @@
       if (control && typeof control.dispose === "function") control.dispose();
     }
     state.mountedControls.segmentedRadios.clear();
+    if (state.mountedControls.settingsDisclosures
+      && typeof state.mountedControls.settingsDisclosures.values === "function") {
+      for (const controller of state.mountedControls.settingsDisclosures.values()) {
+        if (controller && typeof controller.dispose === "function") controller.dispose();
+      }
+      state.mountedControls.settingsDisclosures.clear();
+    }
+    disposeMountedAnimOverrideDisclosures();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -1148,6 +1272,19 @@
     state.mountedControls.roamArea = null;
     state.mountedControls.aboutAutoUpdate = null;
     state.mountedControls.aboutUpdateStatus = null;
+    state.mountedControls.aboutUpdateErrorDisclosure = null;
+  }
+
+  function disposeMountedAnimOverrideDisclosures() {
+    if (!state.mountedControls.animOverrideStatusControls
+      || typeof state.mountedControls.animOverrideStatusControls.values !== "function") return;
+    for (const control of state.mountedControls.animOverrideStatusControls.values()) {
+      if (control && control.disclosureController
+        && typeof control.disclosureController.dispose === "function") {
+        control.disclosureController.dispose();
+      }
+    }
+    state.mountedControls.animOverrideStatusControls.clear();
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {
@@ -1672,7 +1809,7 @@
       }
       if (state.mountedControls.animOverrideStatusControls
         && typeof state.mountedControls.animOverrideStatusControls.clear === "function") {
-        state.mountedControls.animOverrideStatusControls.clear();
+        disposeMountedAnimOverrideDisclosures();
       }
     }
     const shouldPreserveAnimOverridesData = !!(
@@ -1910,6 +2047,7 @@
     buildSettingsSelect,
     buildSegmentedRadio,
     buildCollapsibleGroup,
+    attachSettingsDisclosure,
     createDisclosureChevron,
     attachActivation,
     buildShortcutButton,
