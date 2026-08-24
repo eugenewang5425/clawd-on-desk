@@ -92,12 +92,14 @@
     body.appendChild(bodyInner);
     details.appendChild(summary);
     details.appendChild(body);
-    state.mountedControls.aboutUpdateErrorDisclosure = helpers.attachSettingsDisclosure({
-      root: details,
-      trigger: summary,
-      body,
-      expanded: false,
-    });
+    state.mountedControls.aboutUpdateErrorDisclosure = helpers.registerMountedDisposable(
+      helpers.attachSettingsDisclosure({
+        root: details,
+        trigger: summary,
+        body,
+        expanded: false,
+      }),
+    );
     card.appendChild(details);
 
     const actions = document.createElement("div");
@@ -424,10 +426,7 @@
         updateBtn.textContent = normalized.state === "checking"
           ? t("aboutCheckingForUpdates")
           : t("aboutCheckForUpdates");
-        if (state.mountedControls.aboutUpdateErrorDisclosure
-          && typeof state.mountedControls.aboutUpdateErrorDisclosure.dispose === "function") {
-          state.mountedControls.aboutUpdateErrorDisclosure.dispose();
-        }
+        helpers.disposeMountedDisposable(state.mountedControls.aboutUpdateErrorDisclosure);
         state.mountedControls.aboutUpdateErrorDisclosure = null;
         updateStatusHost.innerHTML = "";
         if (normalized.state === "error" && normalized.error) {

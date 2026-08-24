@@ -183,6 +183,38 @@ function attachDisclosureForHarness({
   };
 }
 
+function createMountedDisposableHarness() {
+  const scopes = new Map();
+  const getScope = (scope = "content") => {
+    if (!scopes.has(scope)) scopes.set(scope, new Set());
+    return scopes.get(scope);
+  };
+  return {
+    scopes,
+    register(disposable, { scope = "content" } = {}) {
+      if (disposable && typeof disposable.dispose === "function") getScope(scope).add(disposable);
+      return disposable;
+    },
+    dispose(disposable) {
+      if (!disposable || typeof disposable.dispose !== "function") return;
+      for (const [scope, controls] of scopes) {
+        controls.delete(disposable);
+        if (controls.size === 0) scopes.delete(scope);
+      }
+      disposable.dispose();
+    },
+    disposeScope(scope = null) {
+      const scopeNames = scope === null ? Array.from(scopes.keys()) : [scope];
+      for (const scopeName of scopeNames) {
+        const controls = scopes.get(scopeName);
+        if (!controls) continue;
+        scopes.delete(scopeName);
+        for (const disposable of Array.from(controls)) disposable.dispose();
+      }
+    },
+  };
+}
+
 class FakeClassList {
   constructor(el) {
     this.el = el;
@@ -2003,6 +2035,7 @@ function loadAboutTabForTest({
   body.appendChild(content);
   const updateCalls = [];
   const toasts = [];
+  const disposableHarness = createMountedDisposableHarness();
   const document = {
     body,
     createElement: (tagName) => new FakeElement(tagName),
@@ -2049,6 +2082,8 @@ function loadAboutTabForTest({
     helpers: {
       t: (key) => key,
       attachSettingsDisclosure: attachDisclosureForHarness,
+      registerMountedDisposable: disposableHarness.register,
+      disposeMountedDisposable: disposableHarness.dispose,
       createDisclosureChevron: (className) => {
         const chevron = document.createElement("span");
         chevron.className = className;
@@ -2071,7 +2106,7 @@ function loadAboutTabForTest({
   };
   context.ClawdSettingsTabAbout.init(core);
   core.tabs.about.render(content, core);
-  return { core, content, updateCalls, toasts };
+  return { core, content, updateCalls, toasts, disposableHarness };
 }
 
 function loadAnimOverridesTabForTest({
@@ -2082,6 +2117,7 @@ function loadAnimOverridesTabForTest({
   readersOverrides = {},
   helpersOverrides = {},
 }) {
+  const disposableHarness = createMountedDisposableHarness();
   const documentListeners = new Map();
   const content = new FakeElement("main");
   content.id = "content";
@@ -2139,6 +2175,8 @@ function loadAnimOverridesTabForTest({
         return chevron;
       },
       attachSettingsDisclosure: attachDisclosureForHarness,
+      registerMountedDisposable: disposableHarness.register,
+      disposeMountedDisposable: disposableHarness.dispose,
       attachActivation: (el, invoke) => {
         if (typeof invoke === "function") el.addEventListener("click", () => invoke());
         return el;
@@ -2155,6 +2193,7 @@ function loadAnimOverridesTabForTest({
       closeAssetPicker: () => {},
       normalizeAssetPickerSelection: () => {},
       showToast: () => {},
+      clearMountedControls: () => disposableHarness.disposeScope(),
       ...opsOverrides,
     },
     i18n: {
@@ -2175,6 +2214,7 @@ function loadAnimOverridesTabForTest({
     content,
     document,
     documentListenerCount: (type) => (documentListeners.get(type) || new Set()).size,
+    disposableHarness,
   };
 }
 
@@ -3399,6 +3439,12 @@ describe("settings renderer browser environment", () => {
     assert.equal(copyButton.textContent, "aboutUpdateErrorCopied");
 
     assert.equal(harness.core.tabs.about.applyUpdateCheckStatus({ state: "checking" }), true);
+    detailsTrigger.click();
+    assert.equal(
+      detailsTrigger.getAttribute("aria-expanded"),
+      "true",
+      "replacing the error card must dispose the detached disclosure trigger",
+    );
     assert.equal(harness.content.querySelector(".about-check-update-btn").disabled, true);
     harness.core.tabs.about.applyUpdateCheckStatus({ state: "error", error: report });
     harness.content.querySelector(".about-update-error-close").dispatchEvent({ type: "click" });
@@ -10843,10 +10889,16 @@ describe("settings renderer browser environment", () => {
     assert.ok(doctorSource.includes("core.helpers.attachSettingsDisclosure({"));
     assert.ok(animSource.includes("helpers.attachSettingsDisclosure({"));
     assert.ok(aboutSource.includes("helpers.attachSettingsDisclosure({"));
-    for (const source of [doctorSource, animSource, aboutSource]) {
-      assert.ok(!source.includes('createElement("details")'));
-      assert.ok(!source.includes("<details"));
+    const rendererSources = fs.readdirSync(SRC_DIR)
+      .filter((name) => /^settings(?:-.+)?\.js$/.test(name) || name === "settings.html")
+      .map((name) => ({ name, source: fs.readFileSync(path.join(SRC_DIR, name), "utf8") }));
+    for (const { name, source } of rendererSources) {
+      assert.ok(!/createElement\(\s*["']details["']\s*\)/.test(source), `${name} must not create native details`);
+      assert.ok(!/<details(?:\s|>)/i.test(source), `${name} must not render native details markup`);
+      assert.ok(!/addEventListener\(\s*["']toggle["']/.test(source), `${name} must not own a disclosure toggle state machine`);
     }
+    assert.ok(doctorSource.indexOf("disposeDoctorDisclosures();") < doctorSource.indexOf("rootEl.innerHTML = ("));
+    assert.ok(/function closeModal\(\) \{\s*disposeDoctorDisclosures\(\);/.test(doctorSource));
   });
 
   it("groups Theme cards and exposes theme import actions in Settings", () => {
@@ -14105,6 +14157,28 @@ describe("settings renderer browser environment", () => {
     assert.ok(uiCoreSource.includes("state.mountedControls.idleVisualPicker.dispose()"));
     assert.ok(uiCoreSource.includes("state.mountedControls.idleVisualPicker = null;"));
     assert.ok(uiCoreSource.includes("idleVisualPicker: null,"));
+  });
+
+  it("disposes Animation Override disclosures before rerendering their rows", () => {
+    const runtime = createAnimOverridesRuntime(createAnimOverrideCard(), { expandedOverrideRowIds: new Set() });
+    const modalRoot = new FakeElement("div");
+    const { core, document } = loadAnimOverridesTabForTest({ runtime, modalRoot });
+    const parent = new FakeElement("main");
+    document.body.appendChild(parent);
+
+    core.tabs.animOverrides.render(parent, core);
+    const oldTrigger = parent.querySelector(".anim-override-row").querySelector(".anim-override-summary");
+    oldTrigger.click();
+    assert.equal(oldTrigger.getAttribute("aria-expanded"), "true");
+
+    core.ops.clearMountedControls();
+    core.tabs.animOverrides.render(parent, core);
+    oldTrigger.click();
+    assert.equal(
+      oldTrigger.getAttribute("aria-expanded"),
+      "true",
+      "the detached row must not retain its disclosure listener",
+    );
   });
 
   it("renders visible loading text for the initial Animation Overrides fetch", () => {

@@ -1650,7 +1650,7 @@
     row.appendChild(summary);
     row.appendChild(body);
 
-    const controller = helpers.attachSettingsDisclosure({
+    helpers.registerMountedDisposable(helpers.attachSettingsDisclosure({
       root: row,
       trigger: summary,
       body,
@@ -1659,11 +1659,11 @@
         if (nextExpanded) runtime.expandedOverrideRowIds.add(card.id);
         else runtime.expandedOverrideRowIds.delete(card.id);
       },
-    });
+    }), { scope: "animation-overrides" });
     if (card && card.id) {
       const controls = getMountedOverrideStatusControls();
       const current = controls.get(card.id) || { cardId: card.id };
-      controls.set(card.id, { ...current, row, card, disclosureController: controller });
+      controls.set(card.id, { ...current, row, card });
     }
     return row;
   }

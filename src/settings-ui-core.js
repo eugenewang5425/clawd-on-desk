@@ -88,6 +88,7 @@
       roamArea: null,
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
+      disposableScopes: new Map(),
       quotaRingDisplayMode: null,
       permissionAutomationMode: null,
       aboutAutoUpdate: null,
@@ -594,6 +595,62 @@
 
   let settingsDisclosureId = 0;
 
+  function prefersReducedMotion() {
+    return typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function scheduleSettingsTimeout(callback, delay) {
+    if (typeof setTimeout === "function") return setTimeout(callback, delay);
+    requestAnimationFrame(callback);
+    return null;
+  }
+
+  function cancelSettingsTimeout(timer) {
+    if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
+  }
+
+  function getMountedDisposableScope(scope = "content") {
+    const scopes = state.mountedControls.disposableScopes;
+    if (!scopes.has(scope)) scopes.set(scope, new Set());
+    return scopes.get(scope);
+  }
+
+  function registerMountedDisposable(disposable, { scope = "content" } = {}) {
+    if (!disposable || typeof disposable.dispose !== "function") return disposable;
+    getMountedDisposableScope(scope).add(disposable);
+    return disposable;
+  }
+
+  function disposeMountedDisposable(disposable, { scope = null } = {}) {
+    if (!disposable || typeof disposable.dispose !== "function") return;
+    const scopes = state.mountedControls.disposableScopes;
+    if (scope !== null) {
+      const controls = scopes.get(scope);
+      if (controls) {
+        controls.delete(disposable);
+        if (controls.size === 0) scopes.delete(scope);
+      }
+    } else {
+      for (const [scopeName, controls] of scopes) {
+        controls.delete(disposable);
+        if (controls.size === 0) scopes.delete(scopeName);
+      }
+    }
+    disposable.dispose();
+  }
+
+  function disposeMountedDisposables(scope = null) {
+    const scopes = state.mountedControls.disposableScopes;
+    const scopeNames = scope === null ? Array.from(scopes.keys()) : [scope];
+    for (const scopeName of scopeNames) {
+      const controls = scopes.get(scopeName);
+      if (!controls) continue;
+      scopes.delete(scopeName);
+      for (const disposable of Array.from(controls)) disposable.dispose();
+    }
+  }
+
   function attachSettingsDisclosure({
     root: disclosureRoot,
     trigger,
@@ -629,23 +686,8 @@
     }
     trigger.setAttribute("aria-controls", body.getAttribute("id"));
 
-    function prefersReducedMotion() {
-      return typeof window.matchMedia === "function"
-        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    }
-
-    function scheduleTimeout(callback, delay) {
-      if (typeof setTimeout === "function") return setTimeout(callback, delay);
-      requestAnimationFrame(callback);
-      return null;
-    }
-
-    function cancelTimeout(timer) {
-      if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
-    }
-
     function finishTransition() {
-      cancelTimeout(transitionTimer);
+      cancelSettingsTimeout(transitionTimer);
       transitionTimer = null;
       transitionState = null;
       disclosureRoot.classList.remove("expanding", "collapsing");
@@ -692,7 +734,7 @@
         }
         transitionState = isExpanded ? "expanding" : "collapsing";
         disclosureRoot.classList.add(transitionState);
-        transitionTimer = scheduleTimeout(finishTransition, 300);
+        transitionTimer = scheduleSettingsTimeout(finishTransition, 300);
       };
       if (typeof preserveStateChange === "function") preserveStateChange(apply);
       else apply();
@@ -828,21 +870,6 @@
 
     let contentAnimationTimer = null;
 
-    function scheduleTimeout(callback, delay) {
-      if (typeof setTimeout === "function") return setTimeout(callback, delay);
-      requestAnimationFrame(callback);
-      return null;
-    }
-
-    function cancelTimeout(timer) {
-      if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
-    }
-
-    function prefersReducedMotion() {
-      return typeof window.matchMedia === "function"
-        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    }
-
     function refreshCollapsibleHeight() {
       // Compatibility shim: the grid-based body follows its natural height.
     }
@@ -851,11 +878,11 @@
       if (typeof mutate !== "function") return;
       mutate();
       if (!controller.expanded || controller.transitioning === "collapsing" || prefersReducedMotion()) return;
-      cancelTimeout(contentAnimationTimer);
+      cancelSettingsTimeout(contentAnimationTimer);
       group.classList.remove("collapsible-content-entering");
       void bodyInner.offsetWidth;
       group.classList.add("collapsible-content-entering");
-      contentAnimationTimer = scheduleTimeout(() => {
+      contentAnimationTimer = scheduleSettingsTimeout(() => {
         contentAnimationTimer = null;
         group.classList.remove("collapsible-content-entering");
       }, 240);
@@ -901,19 +928,15 @@
         writeCollapsedGroupState(nextState);
       },
     });
-    if (!state.mountedControls.settingsDisclosures
-      || typeof state.mountedControls.settingsDisclosures.add !== "function") {
-      state.mountedControls.settingsDisclosures = new Set();
-    }
     const trackedDisclosure = {
       dispose() {
         controller.dispose();
-        cancelTimeout(contentAnimationTimer);
+        cancelSettingsTimeout(contentAnimationTimer);
         contentAnimationTimer = null;
         group.classList.remove("collapsible-content-entering");
       },
     };
-    state.mountedControls.settingsDisclosures.add(trackedDisclosure);
+    registerMountedDisposable(trackedDisclosure);
     group.expand = ({
       persist = true,
       animate = animateExpansion,
@@ -923,8 +946,7 @@
     group.refreshCollapsibleHeight = refreshCollapsibleHeight;
     group.mutateCollapsibleBody = mutateCollapsibleBody;
     group.disposeCollapsible = () => {
-      trackedDisclosure.dispose();
-      state.mountedControls.settingsDisclosures.delete(trackedDisclosure);
+      disposeMountedDisposable(trackedDisclosure);
     };
     return group;
   }
@@ -1229,10 +1251,6 @@
     if (state.mountedControls.textScale && typeof state.mountedControls.textScale.dispose === "function") {
       state.mountedControls.textScale.dispose();
     }
-    if (state.mountedControls.aboutUpdateErrorDisclosure
-      && typeof state.mountedControls.aboutUpdateErrorDisclosure.dispose === "function") {
-      state.mountedControls.aboutUpdateErrorDisclosure.dispose();
-    }
     for (const control of state.mountedControls.settingsSelects) {
       if (control && typeof control.dispose === "function") control.dispose();
     }
@@ -1241,14 +1259,7 @@
       if (control && typeof control.dispose === "function") control.dispose();
     }
     state.mountedControls.segmentedRadios.clear();
-    if (state.mountedControls.settingsDisclosures
-      && typeof state.mountedControls.settingsDisclosures.values === "function") {
-      for (const controller of state.mountedControls.settingsDisclosures.values()) {
-        if (controller && typeof controller.dispose === "function") controller.dispose();
-      }
-      state.mountedControls.settingsDisclosures.clear();
-    }
-    disposeMountedAnimOverrideDisclosures();
+    disposeMountedDisposables();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -1273,18 +1284,6 @@
     state.mountedControls.aboutAutoUpdate = null;
     state.mountedControls.aboutUpdateStatus = null;
     state.mountedControls.aboutUpdateErrorDisclosure = null;
-  }
-
-  function disposeMountedAnimOverrideDisclosures() {
-    if (!state.mountedControls.animOverrideStatusControls
-      || typeof state.mountedControls.animOverrideStatusControls.values !== "function") return;
-    for (const control of state.mountedControls.animOverrideStatusControls.values()) {
-      if (control && control.disclosureController
-        && typeof control.disclosureController.dispose === "function") {
-        control.disclosureController.dispose();
-      }
-    }
-    state.mountedControls.animOverrideStatusControls.clear();
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {
@@ -1809,7 +1808,8 @@
       }
       if (state.mountedControls.animOverrideStatusControls
         && typeof state.mountedControls.animOverrideStatusControls.clear === "function") {
-        disposeMountedAnimOverrideDisclosures();
+        disposeMountedDisposables("animation-overrides");
+        state.mountedControls.animOverrideStatusControls.clear();
       }
     }
     const shouldPreserveAnimOverridesData = !!(
@@ -2048,6 +2048,8 @@
     buildSegmentedRadio,
     buildCollapsibleGroup,
     attachSettingsDisclosure,
+    registerMountedDisposable,
+    disposeMountedDisposable,
     createDisclosureChevron,
     attachActivation,
     buildShortcutButton,
