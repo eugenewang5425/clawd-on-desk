@@ -25,9 +25,9 @@
   --toast-error: #b91c1c;
   --scroll-thumb: rgba(0, 0, 0, 0.15);
   --scroll-thumb-hover: rgba(0, 0, 0, 0.25);
-  --settings-disclosure-duration: 0.22s;
+  --settings-disclosure-duration: 0.2s;
   --settings-disclosure-easing: cubic-bezier(0.22, 1, 0.36, 1);
-  --settings-disclosure-fade-duration: 0.16s;
+  --settings-disclosure-fade-duration: 0.15s;
   --settings-disclosure-shift-duration: 0.18s;
   --settings-disclosure-shift: -4px;
 }
