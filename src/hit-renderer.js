@@ -109,6 +109,17 @@ area.addEventListener("pointerdown", (e) => {
 
 document.addEventListener("pointermove", (e) => {
   if (isDragging) {
+    // #998 review P1: a swallowed pointerup (UAC secure desktop, RDP
+    // reconnect, fullscreen transition) strands isDragging while hover moves
+    // keep flowing. The first move with no pressed button proves the physical
+    // gesture is over — release through the normal stop path (drag-lock false,
+    // drag-end if moved, heartbeat stopped). A real drag always carries
+    // buttons != 0, and a held-still mouse emits no moves at all, so a genuine
+    // long press is never falsely released (that case stays the watchdog's).
+    if (e.buttons === 0) {
+      stopDrag();
+      return;
+    }
     if (!didDrag) {
       const totalDx = e.clientX - mouseDownX;
       const totalDy = e.clientY - mouseDownY;

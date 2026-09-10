@@ -194,6 +194,9 @@ function createRuntime(overrides = {}) {
       : {}),
     ...(overrides.now ? { now: overrides.now } : {}),
     ...(overrides.edgeLog ? { edgeLog: overrides.edgeLog } : {}),
+    ...(overrides.onStrandedDragLockReleased
+      ? { onStrandedDragLockReleased: overrides.onStrandedDragLockReleased }
+      : {}),
     isNearWorkAreaEdge: () => overrides.nearEdge || false,
     flushRuntimeStateToPrefs: () => calls.push(["flushRuntimeStateToPrefs"]),
     handleMiniDisplayChange: () => calls.push(["handleMiniDisplayChange"]),
@@ -4110,6 +4113,35 @@ describe("stranded drag-lock release (#545 follow-up)", () => {
       true,
       "showing the pet must not release a lock a live drag may legitimately hold",
     );
+  });
+
+  it("fires the onStrandedDragLockReleased hook on every real release (review P2)", () => {
+    const released = [];
+    const instances = [];
+    const harness = createRuntime({
+      onStrandedDragLockReleased: () => released.push("hook"),
+    });
+
+    // Every release entry funnels through releaseStrandedDragLock, so the
+    // cross-process cleanup hook must fire for watchdog, healing actions and
+    // the unresponsive ladder alike.
+    harness.runtime.setDragLocked(true);
+    harness.runtime.bringPetToPrimaryDisplay();
+    assert.deepStrictEqual(released, ["hook"], "bring-to-primary must fire the hook");
+
+    harness.runtime.setDragLocked(true);
+    harness.runtime.setPetHidden(true);
+    assert.deepStrictEqual(released, ["hook", "hook"], "manual hide must fire the hook");
+
+    // A no-op release (no lock) must not fire.
+    harness.runtime.releaseStrandedDragLock();
+    assert.deepStrictEqual(released, ["hook", "hook"], "no-lock release stays quiet");
+
+    // Nor must a plain setDragLocked(false).
+    harness.runtime.setDragLocked(true);
+    harness.runtime.setDragLocked(false);
+    assert.deepStrictEqual(released, ["hook", "hook"], "normal drag end must not fire it");
+    void instances;
   });
 
   it("releaseStrandedDragLock is a no-op without a lock", () => {

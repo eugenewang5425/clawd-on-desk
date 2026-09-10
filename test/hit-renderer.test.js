@@ -118,8 +118,8 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
     if (cb) cb({ button, pointerId, clientX, clientY });
   }
 
-  function pointermove({ clientX = 100, clientY = 100 } = {}) {
-    fakeDocument._dispatch("pointermove", { clientX, clientY });
+  function pointermove({ clientX = 100, clientY = 100, buttons = 1 } = {}) {
+    fakeDocument._dispatch("pointermove", { clientX, clientY, buttons });
   }
 
   function fireTimer(predicate) {
@@ -419,6 +419,42 @@ describe("hit-renderer drag-alive heartbeat (#545 follow-up)", () => {
       [["dragAlive"]],
     );
     h.pointerup({});
+  });
+
+  it("releases a stranded drag on the first buttons=0 move (swallowed pointerup)", () => {
+    const h = createHarness();
+    h.pointerdown({});
+    h.pointermove({ clientX: 120, clientY: 120, buttons: 1 });
+    assert.deepStrictEqual(
+      h.apiCalls.filter((c) => c[0] === "dragLock").map((c) => c[1]),
+      [true],
+      "held move must keep the lock",
+    );
+
+    // The physical button is up, but pointerup was swallowed; the hover move
+    // is the only surviving signal.
+    h.pointermove({ clientX: 140, clientY: 140, buttons: 0 });
+
+    assert.deepStrictEqual(
+      h.apiCalls.filter((c) => c[0] === "dragLock").map((c) => c[1]),
+      [true, false],
+      "buttons=0 during a drag must release the lock",
+    );
+    assert.ok(
+      h.timers.some((t) => t.interval && t.cleared),
+      "heartbeat must stop on the recovered release",
+    );
+  });
+
+  it("a held-still drag (no moves at all) is not released by the buttons=0 detector", () => {
+    const h = createHarness();
+    h.pointerdown({});
+    assert.ok(h.fireTimer((t) => t.interval), "heartbeat ticks during a still hold");
+    assert.deepStrictEqual(
+      h.apiCalls.filter((c) => c[0] === "dragLock").map((c) => c[1]),
+      [true],
+      "no pointermove means no release signal — the held press must stay locked",
+    );
   });
 
   it("drops a phantom drag on force-drag-release and stays idempotent", () => {

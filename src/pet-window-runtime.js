@@ -200,6 +200,12 @@ function createPetWindowRuntime(options = {}) {
   // it (see the call site below).
   const notifyMiniTopologyChangedDuringTransition =
     options.notifyMiniTopologyChangedDuringTransition || noop;
+  // #998 review P2: invoked by releaseStrandedDragLock() on every actual
+  // release so main can run the FULL cross-process cleanup (renderer
+  // force-drag-release push, idle/mouse-over resets) from every entry —
+  // watchdog, bring-to-primary, send-to-display, manual hide — instead of
+  // only the watchdog path clearing main-side state.
+  const onStrandedDragLockReleased = options.onStrandedDragLockReleased || null;
   const exitMiniMode = options.exitMiniMode || noop;
   const shouldReloadAfterRenderProcessGone = createRenderProcessGoneReloadGuard(options);
 
@@ -2389,6 +2395,7 @@ function createPetWindowRuntime(options = {}) {
     if (!dragLocked) return false;
     setDragLocked(false);
     clearDragSnapshot();
+    if (typeof onStrandedDragLockReleased === "function") onStrandedDragLockReleased();
     return true;
   }
 

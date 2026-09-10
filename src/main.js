@@ -176,6 +176,7 @@ const {
 } = require("./mac-dock-icon-runtime");
 const createTopmostRuntime = require("./topmost-runtime");
 const { createDragLockWatchdog } = require("./drag-lock-watchdog");
+const { createHitUnresponsiveRecovery } = require("./hit-unresponsive-recovery");
 const { WIN_TOPMOST_LEVEL } = createTopmostRuntime;
 const {
   createHitWindowActivationRuntime,
@@ -1045,6 +1046,19 @@ function setAccessoryMirrored(mirrored) {
 }
 
 const petWindowRuntime = createPetWindowRuntime({
+  // #998 review P2: EVERY stranded-lock release entry (watchdog, healing
+  // actions, unresponsive ladder) funnels through releaseStrandedDragLock and
+  // therefore through this hook — one full cross-process cleanup instead of
+  // each caller reimplementing it.
+  onStrandedDragLockReleased: () => {
+    idlePaused = false;
+    mouseOverPet = false;
+    // If the hit renderer is alive with a phantom capture (its isDragging
+    // still true because the closing event was swallowed, not because it
+    // hung), let it drop through the normal stop path; a hung renderer
+    // ignores this and is handled by the unresponsive recovery ladder.
+    sendToHitWin("force-drag-release");
+  },
   screen,
   isWin,
   isMac,
@@ -1536,18 +1550,91 @@ const dragLockWatchdog = createDragLockWatchdog({
 function forceReleaseStrandedDragLock(reason) {
   if (!petWindowRuntime.releaseStrandedDragLock()) return false;
   console.warn(`Clawd: force-released stranded drag lock (${reason})`);
-  idlePaused = false;
-  mouseOverPet = false;
-  // If the hit renderer is alive with a phantom capture (its isDragging still
-  // true because the closing event was swallowed, not because it hung), let it
-  // drop through the normal stop path; a hung renderer ignores this and gets
-  // reloaded by the unresponsive handler instead.
-  sendToHitWin("force-drag-release");
   return true;
 }
 
 function startDragLockWatchdog() {
   dragLockWatchdog.start();
+}
+
+// ── #998 review P1: bounded recovery for a hung hitWin renderer ──
+// reload → force-crash → rebuild, each with deadlines and caps; see
+// hit-unresponsive-recovery.js. main.js injects the native primitives.
+const hitUnresponsiveRecovery = createHitUnresponsiveRecovery({
+  log: (message) => console.warn(`Clawd: ${message}`),
+  // releaseStrandedDragLock fires the runtime's onStrandedDragLockReleased
+  // hook, which resets idlePaused/mouseOverPet and pushes force-drag-release
+  // — the full cross-process cleanup on every recovery entry (review P2).
+  onRelease: () => petWindowRuntime.releaseStrandedDragLock(),
+  reload: () => petWindowRuntime.reloadWindowWebContents(hitWin),
+  forceCrash: () => {
+    if (!hitWin || hitWin.isDestroyed()) return false;
+    const wc = hitWin.webContents;
+    if (!wc || wc.isDestroyed() || typeof wc.forcefullyCrashRenderer !== "function") return false;
+    try {
+      wc.forcefullyCrashRenderer();
+      return true;
+    } catch (err) {
+      safeConsoleError("hitWin forcefullyCrashRenderer failed:", err && err.message);
+      return false;
+    }
+  },
+  isReady: () => {
+    if (!hitWin || hitWin.isDestroyed()) return false;
+    const wc = hitWin.webContents;
+    return !!wc && !wc.isDestroyed() && !wc.isLoading() && !wc.isCrashed();
+  },
+  rebuild: () => rebuildHitWindow(),
+});
+
+// Extracted from createWindow() so the unresponsive recovery ladder can
+// rebuild the input window outright when reload and force-crash both fail.
+function spawnHitWindow() {
+  hitWin = petWindowRuntime.createHitWindow({
+    BrowserWindow,
+    preloadPath: path.join(__dirname, "preload-hit.js"),
+    loadFilePath: path.join(__dirname, "hit.html"),
+    hitThemeConfig: themeRuntime.getHitRendererConfig(),
+    guardAlwaysOnTop,
+    prepareActivation: (createdHitWin) => (
+      _hitWindowActivationRuntime.controller.prepare(createdHitWin)
+    ),
+    onDidFinishLoad: () => {
+      hitUnresponsiveRecovery.onDidFinishLoad();
+      sendToHitWin("theme-config", themeRuntime.getHitRendererConfig());
+      if (themeRuntime.isReloadInProgress()) return;
+      syncHitStateAfterLoad();
+    },
+    onRenderProcessGone: (details, ownedHitWin) => {
+      safeConsoleError("hitWin renderer crashed:", details.reason);
+      petWindowRuntime.setDragLocked(false);
+      petWindowRuntime.clearDragSnapshot();
+      idlePaused = false;
+      mouseOverPet = false;
+      petWindowRuntime.reloadWindowWebContents(ownedHitWin, { crashKey: "hitWin", details });
+    },
+    // A hung (not crashed) input renderer strands dragLocked the same way a
+    // crash would. The ladder releases drag state on every entry, then
+    // escalates reload → force-crash → rebuild with deadlines and caps.
+    onUnresponsive: () => hitUnresponsiveRecovery.onUnresponsive(),
+  });
+
+  // §4.3.11: the hit window gets the same geometry-blind debounced treatment
+  // as renderWin (see the Issue #690 plan §4.3.9 comment in createWindow),
+  // on its own (longer) HIT_QUIET_MS quiet period.
+  hitWin.on("move", () => petWindowRuntime.onHitNativeGeometryEvent());
+  hitWin.on("resize", () => petWindowRuntime.onHitNativeGeometryEvent());
+
+  syncSessionHudVisibility();
+}
+
+function rebuildHitWindow() {
+  try {
+    if (hitWin && !hitWin.isDestroyed()) hitWin.destroy();
+  } catch (err) {
+    safeConsoleError("hitWin destroy during rebuild failed:", err && err.message);
+  }
+  spawnHitWindow();
 }
 
 function sendToHitWin(channel, ...args) {
@@ -4897,39 +4984,7 @@ function createWindow() {
   ensureContextMenuOwner();
 
   // ── Create input window (hitWin) — small rect over hitbox, receives all pointer events ──
-  hitWin = petWindowRuntime.createHitWindow({
-    BrowserWindow,
-    preloadPath: path.join(__dirname, "preload-hit.js"),
-    loadFilePath: path.join(__dirname, "hit.html"),
-    hitThemeConfig: themeRuntime.getHitRendererConfig(),
-    guardAlwaysOnTop,
-    prepareActivation: (createdHitWin) => (
-      _hitWindowActivationRuntime.controller.prepare(createdHitWin)
-    ),
-    onDidFinishLoad: () => {
-      sendToHitWin("theme-config", themeRuntime.getHitRendererConfig());
-      if (themeRuntime.isReloadInProgress()) return;
-      syncHitStateAfterLoad();
-    },
-    onRenderProcessGone: (details, ownedHitWin) => {
-      safeConsoleError("hitWin renderer crashed:", details.reason);
-      petWindowRuntime.setDragLocked(false);
-      petWindowRuntime.clearDragSnapshot();
-      idlePaused = false;
-      mouseOverPet = false;
-      petWindowRuntime.reloadWindowWebContents(ownedHitWin, { crashKey: "hitWin", details });
-    },
-    // A hung (not crashed) input renderer strands dragLocked the same way a
-    // crash would — release and reload, mirroring the crash path above and
-    // renderWin's own unresponsive policy.
-    onUnresponsive: (ownedHitWin) => {
-      safeConsoleError("hitWin renderer unresponsive — releasing drag lock and reloading");
-      petWindowRuntime.releaseStrandedDragLock();
-      idlePaused = false;
-      mouseOverPet = false;
-      petWindowRuntime.reloadWindowWebContents(ownedHitWin, { crashKey: "hitWin", details: { reason: "unresponsive" } });
-    },
-  });
+  spawnHitWindow();
 
   // Issue #690 plan §4.3.9: these replace (not supplement) the previous
   // synchronous "move"/"resize" -> syncFloatingWindowsAfterPetBoundsChange()
@@ -4940,12 +4995,6 @@ function createWindow() {
   // it has classified the settled geometry.
   win.on("move", () => petWindowRuntime.onNativeGeometryEvent());
   win.on("resize", () => petWindowRuntime.onNativeGeometryEvent());
-  // §4.3.11: the hit window gets the same geometry-blind debounced treatment,
-  // on its own (longer) HIT_QUIET_MS quiet period.
-  hitWin.on("move", () => petWindowRuntime.onHitNativeGeometryEvent());
-  hitWin.on("resize", () => petWindowRuntime.onHitNativeGeometryEvent());
-
-  syncSessionHudVisibility();
 
   registerPetInteractionIpc({
     ipcMain,
